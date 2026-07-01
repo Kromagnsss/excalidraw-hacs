@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Excalidraw</title>
+  <link
+    rel="stylesheet"
+    href="https://esm.sh/@excalidraw/excalidraw@0.17.6/dist/excalidraw.min.css"
+  />
+  <style>
+    html, body, #app { height: 100%; margin: 0; padding: 0; }
+    #status {
+      position: fixed; top: 8px; right: 12px; z-index: 999;
+      font: 12px sans-serif; padding: 2px 8px; border-radius: 8px;
+      background: #eee; color: #333;
+    }
+    #status.connected { background: #d7f5d7; color: #145214; }
+    #status.disconnected { background: #f5d7d7; color: #521414; }
+  </style>
+</head>
+<body>
+  <div id="status">connexion…</div>
+  <div id="app"></div>
+
+  <script type="module">
+    import React from "https://esm.sh/react@18.2.0";
+    import { createRoot } from "https://esm.sh/react-dom@18.2.0/client";
+    import {
+      Excalidraw,
+    } from "https://esm.sh/@excalidraw/excalidraw@0.17.6?deps=react@18.2.0,react-dom@18.2.0";
+
+    const statusEl = document.getElementById("status");
+    const root = createRoot(document.getElementById("app"));
+
+    let excalidrawAPI = null;
+    let applyingRemote = false; // évite les boucles d'écho
+    let sendTimer = null;
+
+    const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${wsProtocol}//${location.host}/api/ha_excalidraw/ws`);
+
+    ws.addEventListener("open", () => {
+      statusEl.textContent = "connecté";
+      statusEl.className = "connected";
+    });
+    ws.addEventListener("close", () => {
+      statusEl.textContent = "déconnecté";
+      statusEl.className = "disconnected";
+    });
+    ws.addEventListener("error", () => {
+      statusEl.textContent = "erreur de connexion";
+      statusEl.className = "disconnected";
+    });
+
+    ws.addEventListener("message", (event) => {
+      const msg = JSON.parse(event.data);
+      if (!excalidrawAPI) return;
+      if (msg.type === "init" || msg.type === "update") {
+        applyingRemote = true;
+        excalidrawAPI.updateScene({
+          elements: msg.payload.elements || [],
+          appState: msg.payload.appState || {},
+        });
+        applyingRemote = false;
+      }
+    });
+
+    function sendScene(elements, appState) {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      // On ne renvoie que les champs utiles de l'appState (pas de position curseur, etc.)
+      const { collaborators, ...safeAppState } = appState;
+      ws.send(
+        JSON.stringify({
+          type: "update",
+          payload: { elements, appState: safeAppState },
+        })
+      );
+    }
+
+    function onChange(elements, appState) {
+      if (applyingRemote) return;
+      clearTimeout(sendTimer);
+      sendTimer = setTimeout(() => sendScene(elements, appState), 150);
+    }
+
+    root.render(
+      React.createElement(Excalidraw, {
+        excalidrawAPI: (api) => {
+          excalidrawAPI = api;
+        },
+        onChange,
+      })
+    );
+  </script>
+</body>
+</html>
