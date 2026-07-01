@@ -43,18 +43,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await async_load_persisted_scene(hass)
 
-    hass.http.register_view(ExcalidrawAppView())
-    hass.http.register_view(ExcalidrawWebSocketView(hass))
+    # Si l'intégration est rechargée (bouton "Recharger"), les vues HTTP et
+    # le panneau peuvent déjà exister depuis le chargement précédent : on
+    # ignore l'erreur plutôt que de faire échouer tout le setup, ce qui
+    # casserait la persistance/la collab pour le reste de la session.
+    if not hass.data[DOMAIN].get("views_registered"):
+        hass.http.register_view(ExcalidrawAppView())
+        hass.http.register_view(ExcalidrawWebSocketView(hass))
+        hass.data[DOMAIN]["views_registered"] = True
 
-    async_register_built_in_panel(
-        hass,
-        component_name="iframe",
-        sidebar_title=PANEL_TITLE,
-        sidebar_icon=PANEL_ICON,
-        frontend_url_path=PANEL_URL_PATH,
-        config={"url": "/api/ha_excalidraw/app"},
-        require_admin=False,
-    )
+    try:
+        async_register_built_in_panel(
+            hass,
+            component_name="iframe",
+            sidebar_title=PANEL_TITLE,
+            sidebar_icon=PANEL_ICON,
+            frontend_url_path=PANEL_URL_PATH,
+            config={"url": "/api/ha_excalidraw/app"},
+            require_admin=False,
+        )
+    except ValueError:
+        _LOGGER.debug("Panneau Excalidraw déjà enregistré, on continue.")
 
     _LOGGER.info("Panneau Excalidraw enregistré sur /%s", PANEL_URL_PATH)
     return True
@@ -65,5 +74,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from homeassistant.components.frontend import async_remove_panel
 
     async_remove_panel(hass, PANEL_URL_PATH)
-    hass.data.pop(DOMAIN, None)
+    # On ne fait PAS hass.data.pop(DOMAIN, None) ici : ça effacerait la
+    # dernière scène en mémoire et la liste des clients connectés à chaque
+    # "Recharger" de l'intégration, ce qui donnait l'impression que le
+    # dessin était perdu alors que Home Assistant n'avait même pas redémarré.
     return True

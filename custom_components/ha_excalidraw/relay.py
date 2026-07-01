@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from aiohttp import web, WSMsgType
 
@@ -104,11 +105,21 @@ class ExcalidrawWebSocketView(HomeAssistantView):
     def _schedule_persist(self, payload: dict) -> None:
         """Persiste la dernière scène sur disque, sans bloquer la boucle."""
         path = self.hass.config.path(STORAGE_FILE)
+        tmp_path = f"{path}.tmp"
 
         def _write() -> None:
             try:
-                with open(path, "w", encoding="utf-8") as handle:
+                # Écriture atomique : fichier temporaire puis renommage, pour
+                # éviter un fichier corrompu/tronqué si HA s'arrête pendant
+                # l'écriture (ex: redémarrage juste après un trait de dessin).
+                with open(tmp_path, "w", encoding="utf-8") as handle:
                     json.dump(payload, handle)
+                os.replace(tmp_path, path)
+                _LOGGER.debug(
+                    "Scène Excalidraw sauvegardée dans %s (%d élément(s))",
+                    path,
+                    len((payload or {}).get("elements", [])),
+                )
             except OSError as err:
                 _LOGGER.warning("Impossible d'enregistrer la scène Excalidraw: %s", err)
 
@@ -123,9 +134,23 @@ async def async_load_persisted_scene(hass: HomeAssistant) -> None:
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 return json.load(handle)
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            _LOGGER.info(
+                "Aucune scène Excalidraw sauvegardée trouvée (%s), démarrage à vide.",
+                path,
+            )
+            return None
+        except (OSError, ValueError) as err:
+            _LOGGER.warning(
+                "Fichier de scène Excalidraw illisible (%s): %s", path, err
+            )
             return None
 
     scene = await hass.async_add_executor_job(_read)
     if scene is not None:
         hass.data.setdefault(DOMAIN, {})["last_scene"] = scene
+        _LOGGER.info(
+            "Scène Excalidraw rechargée depuis %s (%d élément(s))",
+            path,
+            len(scene.get("elements", [])),
+        )

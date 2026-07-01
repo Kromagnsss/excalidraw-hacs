@@ -138,23 +138,19 @@
         ws.send(JSON.stringify({ type: "update", payload: buildPayload(elements, appState) }));
       }
 
-      window.__excalidrawFlush = () => {
-        clearTimeout(sendTimer);
-        if (pendingScene) {
-          sendScene(pendingScene.elements, pendingScene.appState);
-          pendingScene = null;
-        }
-      };
-
+      // Pas de délai/debounce : on envoie immédiatement à chaque changement.
+      // Pour un usage domestique, le volume est négligeable, et ça élimine
+      // toute fenêtre où un trait pourrait être perdu en changeant vite de
+      // panneau HA (l'iframe est détruite sans déclencher pagehide/unload).
       function onChange(elements, appState) {
         if (skipNextOnChange) {
           skipNextOnChange = false;
           return;
         }
-        pendingScene = { elements, appState };
-        clearTimeout(sendTimer);
-        sendTimer = setTimeout(window.__excalidrawFlush, 150);
+        sendScene(elements, appState);
       }
+
+      window.__excalidrawFlush = () => {}; // conservé pour compatibilité, plus nécessaire
 
       root.render(
         React.createElement(ExcalidrawLib.Excalidraw, {
