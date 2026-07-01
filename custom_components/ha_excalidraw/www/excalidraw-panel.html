@@ -96,7 +96,12 @@
 
       const root = ReactDOM.createRoot(document.getElementById("app"));
       let excalidrawAPI = null;
-      let applyingRemote = false;
+      // Au lieu d'un booléen remis à `false` immédiatement après updateScene
+      // (peu fiable car onChange se déclenche de façon asynchrone/batchée par
+      // React), on ignore explicitement le tout prochain onChange déclenché
+      // par une mise à jour distante. Ça évite les boucles d'écho entre
+      // clients qui bloquaient la collaboration après le premier trait.
+      let skipNextOnChange = false;
       let sendTimer = null;
       let hasFittedOnce = false;
       let pendingScene = null;
@@ -105,12 +110,11 @@
         if (!excalidrawAPI) return;
         if (msg.type !== "init" && msg.type !== "update") return;
 
-        applyingRemote = true;
+        skipNextOnChange = true;
         excalidrawAPI.updateScene({
           elements: msg.payload.elements || [],
           appState: msg.payload.appState || {},
         });
-        applyingRemote = false;
 
         // Au premier chargement sur cet appareil, recentre la vue sur le
         // contenu reçu plutôt que d'utiliser la caméra de l'appareil émetteur.
@@ -143,7 +147,10 @@
       };
 
       function onChange(elements, appState) {
-        if (applyingRemote) return;
+        if (skipNextOnChange) {
+          skipNextOnChange = false;
+          return;
+        }
         pendingScene = { elements, appState };
         clearTimeout(sendTimer);
         sendTimer = setTimeout(window.__excalidrawFlush, 150);
