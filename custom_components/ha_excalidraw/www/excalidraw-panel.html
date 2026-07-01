@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Excalidraw</title>
   <link
     rel="stylesheet"
@@ -19,7 +19,11 @@
   }
   </script>
   <style>
-    html, body, #app { height: 100%; margin: 0; padding: 0; }
+    html, body { margin: 0; padding: 0; }
+    html, body, #app {
+      height: 100vh;   /* repli si dvh non supporté */
+      height: 100dvh;  /* tient compte de la barre d'adresse mobile */
+    }
     #status {
       position: fixed; top: 8px; right: 12px; z-index: 999;
       font: 12px sans-serif; padding: 2px 8px; border-radius: 8px;
@@ -27,7 +31,6 @@
     }
     #status.connected { background: #d7f5d7; color: #145214; }
     #status.disconnected { background: #f5d7d7; color: #521414; }
-    #status.error { background: #f5d7d7; color: #521414; white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -36,13 +39,25 @@
 
   <script>
     // --- Bloc 1 : connexion WebSocket, indépendante du chargement d'Excalidraw ---
-    // Volontairement en <script> classique (pas "module") pour ne jamais être
-    // bloqué par un échec d'import ES module plus bas.
     const statusEl = document.getElementById("status");
-
     function setStatus(text, cls) {
       statusEl.textContent = text;
       statusEl.className = cls || "";
+    }
+
+    // Champs d'appState liés à la caméra (position/zoom) : NE JAMAIS les
+    // synchroniser entre appareils, sinon le dessin d'un PC peut se
+    // retrouver hors-cadre sur un téléphone (viewport différent).
+    const VIEWPORT_FIELDS = [
+      "scrollX", "scrollY", "zoom", "width", "height",
+      "offsetLeft", "offsetTop",
+    ];
+
+    function stripViewportFields(appState) {
+      if (!appState) return appState;
+      const clean = { ...appState };
+      for (const key of VIEWPORT_FIELDS) delete clean[key];
+      return clean;
     }
 
     const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -54,15 +69,24 @@
     window.__excalidrawWS.addEventListener("error", () => setStatus("erreur de connexion WebSocket", "disconnected"));
     window.__excalidrawWS.addEventListener("message", (event) => {
       const msg = JSON.parse(event.data);
+      if (msg.payload) msg.payload.appState = stripViewportFields(msg.payload.appState);
       window.__excalidrawLastRemote = msg;
-      if (window.__excalidrawApplyRemote) {
-        window.__excalidrawApplyRemote(msg);
+      if (window.__excalidrawApplyRemote) window.__excalidrawApplyRemote(msg);
+    });
+
+    // Force l'envoi du dernier état en attente quand on quitte/masque la page
+    // (changement d'appli, verrouillage écran, fermeture d'onglet).
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden" && window.__excalidrawFlush) {
+        window.__excalidrawFlush();
       }
+    });
+    window.addEventListener("pagehide", () => {
+      if (window.__excalidrawFlush) window.__excalidrawFlush();
     });
   </script>
 
   <script type="module">
-    // --- Bloc 2 : chargement d'Excalidraw, avec erreurs visibles à l'écran ---
     try {
       const React = (await import("react")).default;
       const ReactDOM = (await import("react-dom/client")).default;
@@ -74,42 +98,73 @@
       let excalidrawAPI = null;
       let applyingRemote = false;
       let sendTimer = null;
+      let hasFittedOnce = false;
+      let pendingScene = null;
 
       window.__excalidrawApplyRemote = (msg) => {
         if (!excalidrawAPI) return;
-        if (msg.type === "init" || msg.type === "update") {
-          applyingRemote = true;
-          excalidrawAPI.updateScene({
-            elements: msg.payload.elements || [],
-            appState: msg.payload.appState || {},
+        if (msg.type !== "init" && msg.type !== "update") return;
+
+        applyingRemote = true;
+        excalidrawAPI.updateScene({
+          elements: msg.payload.elements || [],
+          appState: msg.payload.appState || {},
+        });
+        applyingRemote = false;
+
+        // Au premier chargement sur cet appareil, recentre la vue sur le
+        // contenu reçu plutôt que d'utiliser la caméra de l'appareil émetteur.
+        if (!hasFittedOnce && (msg.payload.elements || []).length > 0) {
+          hasFittedOnce = true;
+          excalidrawAPI.scrollToContent(msg.payload.elements, {
+            fitToViewport: true,
+            animate: false,
           });
-          applyingRemote = false;
         }
       };
+
+      function buildPayload(elements, appState) {
+        const { collaborators, ...safeAppState } = appState;
+        return { elements, appState: stripViewportFields(safeAppState) };
+      }
 
       function sendScene(elements, appState) {
         const ws = window.__excalidrawWS;
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        const { collaborators, ...safeAppState } = appState;
-        ws.send(JSON.stringify({ type: "update", payload: { elements, appState: safeAppState } }));
+        ws.send(JSON.stringify({ type: "update", payload: buildPayload(elements, appState) }));
       }
+
+      window.__excalidrawFlush = () => {
+        clearTimeout(sendTimer);
+        if (pendingScene) {
+          sendScene(pendingScene.elements, pendingScene.appState);
+          pendingScene = null;
+        }
+      };
 
       function onChange(elements, appState) {
         if (applyingRemote) return;
+        pendingScene = { elements, appState };
         clearTimeout(sendTimer);
-        sendTimer = setTimeout(() => sendScene(elements, appState), 150);
+        sendTimer = setTimeout(window.__excalidrawFlush, 150);
       }
 
       root.render(
         React.createElement(ExcalidrawLib.Excalidraw, {
           excalidrawAPI: (api) => {
             excalidrawAPI = api;
-            // Si un message était déjà arrivé avant que l'API soit prête, on l'applique.
             if (window.__excalidrawLastRemote) {
               window.__excalidrawApplyRemote(window.__excalidrawLastRemote);
             }
           },
           onChange,
+          UIOptions: {
+            canvasActions: {
+              loadScene: false,
+              export: { saveFileToDisk: true },
+              toggleTheme: true,
+            },
+          },
         })
       );
     } catch (err) {
