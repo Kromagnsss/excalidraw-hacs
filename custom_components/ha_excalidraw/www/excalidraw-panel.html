@@ -21,8 +21,8 @@
   <style>
     html, body { margin: 0; padding: 0; }
     html, body, #app {
-      height: 100vh;   /* repli si dvh non supporté */
-      height: 100dvh;  /* tient compte de la barre d'adresse mobile */
+      height: 100vh;
+      height: 100dvh;
     }
     #status {
       position: fixed; top: 8px; right: 12px; z-index: 999;
@@ -38,21 +38,17 @@
   <div id="app"></div>
 
   <script>
-    // --- Bloc 1 : connexion WebSocket, indépendante du chargement d'Excalidraw ---
+    // --- Bloc 1 : connexion WebSocket + promesse des données initiales ---
     const statusEl = document.getElementById("status");
     function setStatus(text, cls) {
       statusEl.textContent = text;
       statusEl.className = cls || "";
     }
 
-    // Champs d'appState liés à la caméra (position/zoom) : NE JAMAIS les
-    // synchroniser entre appareils, sinon le dessin d'un PC peut se
-    // retrouver hors-cadre sur un téléphone (viewport différent).
     const VIEWPORT_FIELDS = [
       "scrollX", "scrollY", "zoom", "width", "height",
       "offsetLeft", "offsetTop",
     ];
-
     function stripViewportFields(appState) {
       if (!appState) return appState;
       const clean = { ...appState };
@@ -60,9 +56,17 @@
       return clean;
     }
 
+    // La promesse que le composant Excalidraw attend avant de terminer son
+    // propre montage : tant qu'elle n'est pas résolue, Excalidraw n'affiche
+    // pas de scène vide qui pourrait déclencher un onChange parasite.
+    let _resolveInitialData;
+    window.__initialDataPromise = new Promise((resolve) => {
+      _resolveInitialData = resolve;
+    });
+    let _initialDataResolved = false;
+
     const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
     window.__excalidrawWS = new WebSocket(`${wsProtocol}//${location.host}/api/ha_excalidraw/ws`);
-    window.__excalidrawLastRemote = null;
 
     window.__excalidrawWS.addEventListener("open", () => setStatus("connecté", "connected"));
     window.__excalidrawWS.addEventListener("close", () => setStatus("déconnecté", "disconnected"));
@@ -70,19 +74,18 @@
     window.__excalidrawWS.addEventListener("message", (event) => {
       const msg = JSON.parse(event.data);
       if (msg.payload) msg.payload.appState = stripViewportFields(msg.payload.appState);
-      window.__excalidrawLastRemote = msg;
-      if (window.__excalidrawApplyRemote) window.__excalidrawApplyRemote(msg);
-    });
 
-    // Force l'envoi du dernier état en attente quand on quitte/masque la page
-    // (changement d'appli, verrouillage écran, fermeture d'onglet).
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden" && window.__excalidrawFlush) {
-        window.__excalidrawFlush();
+      if (msg.type === "init" && !_initialDataResolved) {
+        _initialDataResolved = true;
+        _resolveInitialData({
+          elements: msg.payload.elements || [],
+          appState: msg.payload.appState || {},
+        });
+        return;
       }
-    });
-    window.addEventListener("pagehide", () => {
-      if (window.__excalidrawFlush) window.__excalidrawFlush();
+
+      // Mise à jour reçue après le chargement initial (collab en direct).
+      if (window.__excalidrawApplyRemote) window.__excalidrawApplyRemote(msg);
     });
   </script>
 
@@ -96,80 +99,52 @@
 
       const root = ReactDOM.createRoot(document.getElementById("app"));
       let excalidrawAPI = null;
-      // Au lieu d'un booléen remis à `false` immédiatement après updateScene
-      // (peu fiable car onChange se déclenche de façon asynchrone/batchée par
-      // React), on ignore explicitement le tout prochain onChange déclenché
-      // par une mise à jour distante. Ça évite les boucles d'écho entre
-      // clients qui bloquaient la collaboration après le premier trait.
       let skipNextOnChange = false;
-      let sendTimer = null;
       let hasFittedOnce = false;
-      let pendingScene = null;
-      // Aucun envoi vers le serveur tant qu'on n'a pas reçu ET appliqué le
-      // message "init" initial : évite qu'un onChange "à vide" déclenché au
-      // montage du composant (avant l'arrivée du vrai contenu) n'écrase la
-      // scène existante.
-      let synced = false;
 
       window.__excalidrawApplyRemote = (msg) => {
         if (!excalidrawAPI) return;
-        if (msg.type !== "init" && msg.type !== "update") return;
+        if (msg.type !== "update") return;
 
         skipNextOnChange = true;
         excalidrawAPI.updateScene({
           elements: msg.payload.elements || [],
           appState: msg.payload.appState || {},
         });
-
-        if (msg.type === "init") {
-          synced = true;
-        }
-
-        // Au premier chargement sur cet appareil, recentre la vue sur le
-        // contenu reçu plutôt que d'utiliser la caméra de l'appareil émetteur.
-        if (!hasFittedOnce && (msg.payload.elements || []).length > 0) {
-          hasFittedOnce = true;
-          excalidrawAPI.scrollToContent(msg.payload.elements, {
-            fitToViewport: true,
-            animate: false,
-          });
-        }
       };
 
-      function buildPayload(elements, appState) {
-        const { collaborators, ...safeAppState } = appState;
-        return { elements, appState: stripViewportFields(safeAppState) };
+      function stripViewportFields(appState) {
+        const clean = { ...appState };
+        for (const key of ["scrollX", "scrollY", "zoom", "width", "height", "offsetLeft", "offsetTop"]) {
+          delete clean[key];
+        }
+        return clean;
       }
 
       function sendScene(elements, appState) {
         const ws = window.__excalidrawWS;
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        ws.send(JSON.stringify({ type: "update", payload: buildPayload(elements, appState) }));
+        const { collaborators, ...safeAppState } = appState;
+        ws.send(JSON.stringify({
+          type: "update",
+          payload: { elements, appState: stripViewportFields(safeAppState) },
+        }));
       }
 
-      // Pas de délai/debounce : on envoie immédiatement à chaque changement.
-      // Pour un usage domestique, le volume est négligeable, et ça élimine
-      // toute fenêtre où un trait pourrait être perdu en changeant vite de
-      // panneau HA (l'iframe est détruite sans déclencher pagehide/unload).
       function onChange(elements, appState) {
         if (skipNextOnChange) {
           skipNextOnChange = false;
           return;
         }
-        if (!synced) return;
         sendScene(elements, appState);
       }
-
-      window.__excalidrawFlush = () => {}; // conservé pour compatibilité, plus nécessaire
 
       root.render(
         React.createElement(ExcalidrawLib.Excalidraw, {
           excalidrawAPI: (api) => {
             excalidrawAPI = api;
-            if (window.__excalidrawLastRemote) {
-              window.__excalidrawApplyRemote(window.__excalidrawLastRemote);
-            }
           },
+          initialData: window.__initialDataPromise,
           onChange,
           UIOptions: {
             canvasActions: {
@@ -180,6 +155,18 @@
           },
         })
       );
+
+      // Une fois les données initiales appliquées par Excalidraw lui-même,
+      // recentre la vue sur le contenu (caméra propre à cet appareil).
+      window.__initialDataPromise.then((data) => {
+        if ((data.elements || []).length > 0 && excalidrawAPI && !hasFittedOnce) {
+          hasFittedOnce = true;
+          // Laisse Excalidraw terminer son rendu avant de recentrer.
+          requestAnimationFrame(() => {
+            excalidrawAPI.scrollToContent(data.elements, { fitToViewport: true, animate: false });
+          });
+        }
+      });
     } catch (err) {
       console.error("Échec du chargement d'Excalidraw :", err);
       const appEl = document.getElementById("app");
