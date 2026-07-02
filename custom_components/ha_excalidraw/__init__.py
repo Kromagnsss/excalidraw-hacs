@@ -20,16 +20,17 @@ WWW_DIR = Path(__file__).parent / "www"
 
 
 class ExcalidrawAppView(HomeAssistantView):
-    """Sert la page HTML du canvas Excalidraw."""
+    """Sert la page HTML du canvas Excalidraw (depuis un cache mémoire)."""
 
     url = "/api/ha_excalidraw/app"
     name = "api:ha_excalidraw:app"
     requires_auth = False
 
+    def __init__(self, html_content: str) -> None:
+        self._html_content = html_content
+
     async def get(self, request: web.Request) -> web.Response:
-        html_path = WWW_DIR / "excalidraw-panel.html"
-        content = html_path.read_text(encoding="utf-8")
-        return web.Response(text=content, content_type="text/html")
+        return web.Response(text=self._html_content, content_type="text/html")
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -48,7 +49,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # ignore l'erreur plutôt que de faire échouer tout le setup, ce qui
     # casserait la persistance/la collab pour le reste de la session.
     if not hass.data[DOMAIN].get("views_registered"):
-        hass.http.register_view(ExcalidrawAppView())
+        html_path = WWW_DIR / "excalidraw-panel.html"
+        html_content = await hass.async_add_executor_job(
+            html_path.read_text, "utf-8"
+        )
+        hass.http.register_view(ExcalidrawAppView(html_content))
         hass.http.register_view(ExcalidrawWebSocketView(hass))
         hass.data[DOMAIN]["views_registered"] = True
 
