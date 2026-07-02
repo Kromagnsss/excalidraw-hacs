@@ -14,11 +14,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 
 from aiohttp import web, WSMsgType
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_call_later
 
 from .const import DOMAIN, STORAGE_FILE
 
@@ -37,6 +39,8 @@ class ExcalidrawWebSocketView(HomeAssistantView):
         store = hass.data.setdefault(DOMAIN, {})
         store.setdefault("clients", set())
         store.setdefault("last_scene", None)
+        self._persist_cancel = None
+        self._pending_payload: dict | None = None
 
     async def get(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=30)
@@ -85,7 +89,7 @@ class ExcalidrawWebSocketView(HomeAssistantView):
             return
 
         store["last_scene"] = payload
-        self._schedule_persist(payload)
+        self._debounce_persist(payload)
 
         # Diffuse aux autres clients connectés (pas à l'émetteur)
         stale: list[web.WebSocketResponse] = []
@@ -102,16 +106,28 @@ class ExcalidrawWebSocketView(HomeAssistantView):
         for client in stale:
             clients.discard(client)
 
-    def _schedule_persist(self, payload: dict) -> None:
-        """Persiste la dernière scène sur disque, sans bloquer la boucle."""
+    def _debounce_persist(self, payload: dict) -> None:
+        """Regroupe les écritures disque : au plus une par seconde, dernière valeur gagne."""
+        self._pending_payload = payload
+        if self._persist_cancel is not None:
+            self._persist_cancel()
+        self._persist_cancel = async_call_later(self.hass, 1.0, self._persist_now)
+
+    async def _persist_now(self, _now=None) -> None:
+        self._persist_cancel = None
+        payload = self._pending_payload
+        if payload is None:
+            return
+        self._pending_payload = None
+
         path = self.hass.config.path(STORAGE_FILE)
-        tmp_path = f"{path}.tmp"
+        # Nom de fichier temporaire unique à chaque écriture : évite toute
+        # collision si, malgré le regroupement, deux écritures se chevauchent
+        # (ex: au moment où l'add-on redémarre juste après un dessin).
+        tmp_path = f"{path}.{uuid.uuid4().hex}.tmp"
 
         def _write() -> None:
             try:
-                # Écriture atomique : fichier temporaire puis renommage, pour
-                # éviter un fichier corrompu/tronqué si HA s'arrête pendant
-                # l'écriture (ex: redémarrage juste après un trait de dessin).
                 with open(tmp_path, "w", encoding="utf-8") as handle:
                     json.dump(payload, handle)
                 os.replace(tmp_path, path)
@@ -123,7 +139,7 @@ class ExcalidrawWebSocketView(HomeAssistantView):
             except OSError as err:
                 _LOGGER.warning("Impossible d'enregistrer la scène Excalidraw: %s", err)
 
-        self.hass.async_add_executor_job(_write)
+        await self.hass.async_add_executor_job(_write)
 
 
 async def async_load_persisted_scene(hass: HomeAssistant) -> None:
