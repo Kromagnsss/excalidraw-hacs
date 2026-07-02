@@ -105,6 +105,11 @@
       let sendTimer = null;
       let hasFittedOnce = false;
       let pendingScene = null;
+      // Aucun envoi vers le serveur tant qu'on n'a pas reçu ET appliqué le
+      // message "init" initial : évite qu'un onChange "à vide" déclenché au
+      // montage du composant (avant l'arrivée du vrai contenu) n'écrase la
+      // scène existante.
+      let synced = false;
 
       window.__excalidrawApplyRemote = (msg) => {
         if (!excalidrawAPI) return;
@@ -115,6 +120,10 @@
           elements: msg.payload.elements || [],
           appState: msg.payload.appState || {},
         });
+
+        if (msg.type === "init") {
+          synced = true;
+        }
 
         // Au premier chargement sur cet appareil, recentre la vue sur le
         // contenu reçu plutôt que d'utiliser la caméra de l'appareil émetteur.
@@ -147,6 +156,7 @@
           skipNextOnChange = false;
           return;
         }
+        if (!synced) return;
         sendScene(elements, appState);
       }
 

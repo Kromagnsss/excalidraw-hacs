@@ -51,9 +51,15 @@ class ExcalidrawWebSocketView(HomeAssistantView):
         clients.add(ws)
         _LOGGER.debug("Client Excalidraw connecté (%d au total)", len(clients))
 
-        # Envoie l'état actuel de la scène au nouveau client, s'il existe
-        if store["last_scene"] is not None:
-            await ws.send_json({"type": "init", "payload": store["last_scene"]})
+        # Envoie systématiquement un message "init" (même vide) : le client
+        # en a besoin pour savoir que la synchronisation initiale est
+        # terminée, et donc qu'il peut commencer à envoyer ses propres
+        # modifications sans risquer d'écraser une scène existante avec un
+        # canvas vide au tout premier rendu.
+        await ws.send_json({
+            "type": "init",
+            "payload": store["last_scene"] or {"elements": [], "appState": {}},
+        })
 
         try:
             async for msg in ws:
