@@ -168,21 +168,32 @@
       ];
 
       async function loadDefaultLibraries(api) {
+        if (window.__librariesLoaded) return;
+        window.__librariesLoaded = true;
+
         const allItems = [];
         for (const url of DEFAULT_LIBRARY_URLS) {
           try {
             const res = await fetch(url);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
-            if (Array.isArray(data.libraryItems)) {
-              allItems.push(...data.libraryItems);
-            }
+            const items = Array.isArray(data.libraryItems)
+              ? data.libraryItems
+              : Array.isArray(data)
+                ? data // anciennes bibliothèques : tableau brut sans enveloppe
+                : [];
+            console.log(`Bibliothèque chargée: ${url} (${items.length} élément(s))`);
+            allItems.push(...items);
           } catch (err) {
             console.warn(`Échec du chargement de la bibliothèque ${url} :`, err);
           }
+          // Petite pause entre chaque requête, au cas où le CDN limite les
+          // appels trop rapprochés.
+          await new Promise((resolve) => setTimeout(resolve, 300));
         }
         if (allItems.length > 0) {
           api.updateLibrary({ libraryItems: allItems, merge: true });
+          console.log(`Total : ${allItems.length} élément(s) de bibliothèque chargé(s).`);
         }
       }
 
